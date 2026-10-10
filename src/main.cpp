@@ -4,7 +4,12 @@
 #include <cmath>
 #include <algorithm>
 
-// ROI polygon (bottom-right area where rails are in this video)
+// ---- Tunable settings ----
+const double HALF_W_BOTTOM = 0.12;  // corridor half-width at bottom
+const double HALF_W_TOP    = 0.02;  // corridor half-width at top
+const double X_SHIFT       = -0.06;  // move corridor left
+const float  SMOOTH        = 0.2f;  // smaller = smoother
+
 std::vector<cv::Point> roiPolygon(int w, int h) {
     return {
         cv::Point((int)(w * 0.40), h),
@@ -23,7 +28,7 @@ cv::Mat applyROI(const cv::Mat& edges) {
     return out;
 }
 
-// Fit one line x = a*y + b through all segment endpoints (least squares)
+// Fit one line x = a*y + b through all segment endpoints
 bool fitRailLine(const std::vector<cv::Vec4i>& segs, int yTop, int yBottom,
                  cv::Point& p1, cv::Point& p2) {
     if (segs.size() < 2) return false;
@@ -43,6 +48,20 @@ bool fitRailLine(const std::vector<cv::Vec4i>& segs, int yTop, int yBottom,
     return true;
 }
 
+// Is a point inside the hazard zone? (for the YOLO step later)
+bool inHazardZone(const std::vector<cv::Point>& zone, cv::Point pt) {
+    if (zone.size() < 3) return false;
+    bool inside = false;
+    for (size_t i = 0, j = zone.size() - 1; i < zone.size(); j = i++) {
+        double xi = zone[i].x, yi = zone[i].y;
+        double xj = zone[j].x, yj = zone[j].y;
+        bool crosses = ((yi > pt.y) != (yj > pt.y)) &&
+                       (pt.x < (xj - xi) * (pt.y - yi) / (yj - yi) + xi);
+        if (crosses) inside = !inside;
+    }
+    return inside;
+}
+
 int main(int argc, char** argv) {
     std::string path = (argc > 1) ? argv[1] : "../data/test.mp4";
     cv::VideoCapture cap(path);
@@ -51,8 +70,11 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    cv::Mat frame, small, gray, blur, edges, roi, view;
+    cv::Mat frame, small, gray, blur, edges, roi, view, overlay;
     int n = 0;
+    bool init = false;
+    float sxb = 0, sxt = 0;
+
     while (cap.read(frame)) {
         double scale = 600.0 / frame.rows;
         cv::resize(frame, small, cv::Size(), scale, scale);
@@ -66,10 +88,9 @@ int main(int argc, char** argv) {
         cv::HoughLinesP(roi, lines, 1, CV_PI / 180, 50, 50, 8);
 
         view = small.clone();
-        auto poly = roiPolygon(view.cols, view.rows);
-        cv::polylines(view, poly, true, cv::Scalar(0, 255, 0), 1);
+        int W = view.cols, H = view.rows;
+        cv::polylines(view, roiPolygon(W, H), true, cv::Scalar(0, 255, 0), 1);
 
-        // Keep steep segments only (drop near-horizontal sleepers)
         std::vector<cv::Vec4i> steep;
         std::vector<double> midX;
         for (const auto& l : lines) {
@@ -80,7 +101,6 @@ int main(int argc, char** argv) {
             midX.push_back((l[0] + l[2]) / 2.0);
         }
 
-        // Split into left/right rail by median x
         std::vector<cv::Vec4i> left, right;
         if (steep.size() >= 4) {
             std::vector<double> sorted = midX;
@@ -92,26 +112,61 @@ int main(int argc, char** argv) {
             }
         }
 
-        int yTop = (int)(view.rows * 0.58), yBot = view.rows - 1;
+        int yTop = (int)(H * 0.58), yBot = H - 1;
         cv::Point a1, a2, b1, b2;
         bool okL = fitRailLine(left, yTop, yBot, a1, a2);
         bool okR = fitRailLine(right, yTop, yBot, b1, b2);
-        if (okL) cv::line(view, a1, a2, cv::Scalar(0, 0, 255), 3);   // red = left rail
-        if (okR) cv::line(view, b1, b2, cv::Scalar(255, 0, 0), 3);   // blue = right rail
+        if (okL) cv::line(view, a1, a2, cv::Scalar(0, 0, 255), 2);
+        if (okR) cv::line(view, b1, b2, cv::Scalar(255, 0, 0), 2);
 
-        cv::imshow("1 Original + Lines", view);
+        float xb = 0, xt = 0;
+        bool have = false;
+        if (okL && okR) { xb = (a1.x + b1.x) / 2.0f; xt = (a2.x + b2.x) / 2.0f; have = true; }
+        else if (okL)   { xb = (float)a1.x; xt = (float)a2.x; have = true; }
+        else if (okR)   { xb = (float)b1.x; xt = (float)b2.x; have = true; }
+
+        if (have) {
+            if (!init) { sxb = xb; sxt = xt; init = true; }
+            else {
+                sxb = (1 - SMOOTH) * sxb + SMOOTH * xb;
+                sxt = (1 - SMOOTH) * sxt + SMOOTH * xt;
+            }
+        }
+
+        std::vector<cv::Point> zone;
+        if (init) {
+            float shift = (float)(X_SHIFT * W);
+            float wb = (float)(HALF_W_BOTTOM * W);
+            float wt = (float)(HALF_W_TOP * W);
+            zone = {
+                cv::Point((int)(sxb + shift - wb), yBot),
+                cv::Point((int)(sxt + shift - wt), yTop),
+                cv::Point((int)(sxt + shift + wt), yTop),
+                cv::Point((int)(sxb + shift + wb), yBot)
+            };
+            overlay = view.clone();
+            cv::fillConvexPoly(overlay, zone, cv::Scalar(0, 255, 0));
+            cv::addWeighted(overlay, 0.35, view, 0.65, 0, view);
+            cv::polylines(view, zone, true, cv::Scalar(0, 255, 255), 2);
+        }
+
+        cv::putText(view, init ? "Hazard zone: ON" : "Hazard zone: searching...",
+                    cv::Point(10, 25), cv::FONT_HERSHEY_SIMPLEX, 0.6,
+                    cv::Scalar(0, 255, 255), 2);
+
+        cv::imshow("1 Hazard Zone", view);
         cv::imshow("3 ROI Edges", roi);
 
         if (n % 50 == 0 && n <= 200) {
-            cv::imwrite("../hough_" + std::to_string(n) + ".png", view);
-            std::cout << "Frame " << n << ": segments " << lines.size()
-                      << ", steep " << steep.size()
-                      << ", L " << left.size() << ", R " << right.size() << std::endl;
+            cv::imwrite("../hazard_" + std::to_string(n) + ".png", view);
+            std::cout << "Frame " << n << ": L " << left.size()
+                      << ", R " << right.size()
+                      << ", zone " << (init ? "ok" : "none") << std::endl;
         }
 
         int key = cv::waitKey(30);
-        if (key == 'p') key = cv::waitKey(0);   // p = pause, next key = resume
-        if (key == 27 || key == 'q') break;     // Esc or q = quit
+        if (key == 'p') key = cv::waitKey(0);
+        if (key == 27 || key == 'q') break;
         n++;
     }
     return 0;
