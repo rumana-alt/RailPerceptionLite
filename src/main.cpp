@@ -15,8 +15,8 @@ const float  NMS_THRESH    = 0.45f;
 const int    DETECT_EVERY  = 3;
 
 // Fixed zone for "wide" mode (fractions of width/height) - tune these
-const double WZ_BL_X = 0.00, WZ_BR_X = 0.70, WZ_BY = 1.00;   // bottom-left, bottom-right
-const double WZ_TL_X = 0.25, WZ_TR_X = 0.55, WZ_TY = 0.62;   // top-left, top-right
+const double WZ_BL_X = 0.00, WZ_BR_X = 0.70, WZ_BY = 1.00;
+const double WZ_TL_X = 0.25, WZ_TR_X = 0.55, WZ_TY = 0.62;
 
 struct Det {
     cv::Rect box;
@@ -167,6 +167,9 @@ int main(int argc, char** argv) {
     std::cout << "Mode: " << (wide ? "wide (fixed zone)" : "auto (Hough zone)")
               << "  |  keys: t = test alert, p = pause, q = quit" << std::endl;
 
+    cv::VideoWriter writer;
+    bool recording = true;
+
     cv::Mat frame, small, gray, blur, edges, roi, view, overlay;
     int n = 0, savedAlerts = 0;
     bool init = false, testMode = false;
@@ -183,7 +186,6 @@ int main(int argc, char** argv) {
         std::vector<cv::Point> zone;
 
         if (wide) {
-            // Fixed zone, no Hough
             zone = {
                 cv::Point((int)(W * WZ_BL_X), (int)(H * WZ_BY) - 1),
                 cv::Point((int)(W * WZ_TL_X), (int)(H * WZ_TY)),
@@ -259,10 +261,8 @@ int main(int argc, char** argv) {
             cv::polylines(view, zone, true, cv::Scalar(0, 255, 255), 2);
         }
 
-        // YOLO every Nth frame
         if (n % DETECT_EVERY == 0) dets = detect(net, small);
 
-        // Test mode: fake person standing inside the zone
         std::vector<Det> all = dets;
         if (testMode && init && zone.size() == 4) {
             int fx = (zone[0].x + zone[3].x) / 2;
@@ -304,6 +304,20 @@ int main(int argc, char** argv) {
 
         cv::imshow("1 Rail Perception", view);
 
+        // Record the annotated output
+        if (recording) {
+            if (!writer.isOpened()) {
+                writer.open("../demo_output.mp4",
+                            cv::VideoWriter::fourcc('m', 'p', '4', 'v'),
+                            25, view.size());
+                if (!writer.isOpened()) {
+                    std::cerr << "Cannot open VideoWriter" << std::endl;
+                    recording = false;
+                }
+            }
+            if (recording) writer.write(view);
+        }
+
         if (n % 50 == 0) {
             std::cout << "Frame " << n << ": detections " << dets.size()
                       << ", alerts " << alerts
@@ -316,5 +330,8 @@ int main(int argc, char** argv) {
         if (key == 27 || key == 'q') break;
         n++;
     }
+
+    writer.release();
+    std::cout << "Saved ../demo_output.mp4" << std::endl;
     return 0;
 }

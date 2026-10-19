@@ -2,3 +2,4 @@ build/
 data/*.mp4
 *.png
 *.onnx
+demo_output.mp4
