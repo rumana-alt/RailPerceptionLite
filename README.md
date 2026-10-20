@@ -4,6 +4,10 @@ A lightweight C++ computer-vision prototype that watches railway-track video, ma
 
 Built with C++ and OpenCV (including the `dnn` module) and YOLOv8n (ONNX), as a 4-week MVP for the FETONIX internship.
 
+## Demo
+
+![ALERT when a person stands on the track](docs/alert.png)
+
 ## Pipeline
 
 1. **Read video** and resize each frame (600 px height).
